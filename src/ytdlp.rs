@@ -258,6 +258,21 @@ impl Engine {
         );
     }
 
+    /// yt-dlp format for mpv's ytdl hook (best video up to the preferred
+    /// height + best audio).
+    pub fn ytdl_format(cfg: &Config) -> String {
+        format!("bv*[height<={}]+ba/b", cfg.quality)
+    }
+
+    /// `--ytdl-raw-options` that attach the user's YouTube session.
+    pub fn ytdl_raw(cfg: &Config) -> Vec<String> {
+        match &cfg.account {
+            Account::SignedOut => vec![],
+            Account::Browser(b) => vec![format!("cookies-from-browser={b}")],
+            Account::CookieFile => vec![format!("cookies={}", Config::cookie_file().display())],
+        }
+    }
+
     /// Launches mpv (or compatible) pointed at our yt-dlp + session, and
     /// returns how long the viewer watched once the player closes (blocking).
     pub fn play(cfg: &Config, item: &VideoItem) -> Result<Playback, String> {
@@ -279,14 +294,10 @@ impl Engine {
             "--script-opts=ytdl_hook-ytdl_path={}",
             Self::exe(cfg).display()
         ))
-        .arg(format!("--ytdl-format=bv*[height<={}]+ba/b", cfg.quality))
+        .arg(format!("--ytdl-format={}", Self::ytdl_format(cfg)))
         .arg(format!("--title={}", item.title))
         .arg("--force-window=immediate");
-        let raw: Vec<String> = match &cfg.account {
-            Account::SignedOut => vec![],
-            Account::Browser(b) => vec![format!("cookies-from-browser={b}")],
-            Account::CookieFile => vec![format!("cookies={}", Config::cookie_file().display())],
-        };
+        let raw = Self::ytdl_raw(cfg);
         if !raw.is_empty() {
             c.arg(format!("--ytdl-raw-options={}", raw.join(",")));
         }

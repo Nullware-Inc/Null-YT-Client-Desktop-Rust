@@ -39,6 +39,12 @@ pub struct Config {
     pub foryou_remember: bool,
     // Player
     pub quality: u32,
+    /// Play inside the app with libmpv (falls back to `player` if missing).
+    pub embedded_player: bool,
+    /// Play the next video in the list when one ends.
+    pub autoplay: bool,
+    /// 0..130 (mpv volume).
+    pub volume: f64,
     pub player: String,
     // Sync
     pub account: Account,
@@ -66,6 +72,9 @@ impl Default for Config {
             home_source: "youtube".into(),
             foryou_remember: true,
             quality: 1080,
+            embedded_player: true,
+            autoplay: true,
+            volume: 100.0,
             player: "mpv".into(),
             account: Account::SignedOut,
             send_watch_history: true,

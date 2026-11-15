@@ -2,6 +2,7 @@
 
 mod config;
 mod foryou;
+mod player;
 mod ytdlp;
 
 use config::{Account, Config};
@@ -10,7 +11,7 @@ use slint::{
     Color, ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel,
 };
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use ytdlp::{Engine, Feed, VideoItem, fmt_count, fmt_duration};
 
@@ -27,6 +28,38 @@ struct State {
     /// Bumped on every feed load so late thumbnails for an old feed are dropped.
     generation: AtomicU64,
     thumbs: Mutex<mpsc::Sender<(u64, usize, String)>>,
+    /// The built-in player, created on first use.
+    player: Mutex<Option<player::Player>>,
+    now: Mutex<Option<NowPlaying>>,
+    /// A frame is on its way to the UI; skip new ones until it lands.
+    frame_pending: Arc<AtomicBool>,
+    /// Last mouse/keyboard activity over the player (controls auto-hide).
+    last_activity: Mutex<std::time::Instant>,
+    sleep: Mutex<Option<Sleep>>,
+}
+
+#[derive(Clone, Copy)]
+enum Sleep {
+    At(std::time::Instant),
+    EndOfVideo,
+}
+
+/// What the built-in player is showing.
+struct NowPlaying {
+    list: Vec<VideoItem>,
+    index: usize,
+    /// Furthest point reached, for the For You feed.
+    furthest: f64,
+    /// Page to go back to.
+    back_to: i32,
+    /// Chapter marks were read for this video.
+    chapters_read: bool,
+}
+
+impl NowPlaying {
+    fn item(&self) -> &VideoItem {
+        &self.list[self.index]
+    }
 }
 
 impl State {
@@ -87,6 +120,7 @@ fn push_config(ui: &AppWindow, c: &Config) {
     ui.set_hide_live(c.hide_live);
     ui.set_send_history(c.send_watch_history);
     ui.set_quality_index(QUALITIES.iter().position(|q| *q == c.quality).unwrap_or(5) as i32);
+    ui.set_player_quality_index(ui.get_quality_index());
     ui.set_player(c.player.clone().into());
     ui.set_effect_index(
         EFFECTS
@@ -99,6 +133,8 @@ fn push_config(ui: &AppWindow, c: &Config) {
     ui.set_signed_in(c.account != Account::SignedOut);
     ui.set_session_home(session_home(c));
     ui.set_foryou_remember(c.foryou_remember);
+    ui.set_embedded_player(c.embedded_player);
+    ui.set_player_volume((c.volume / 100.0) as f32);
 }
 
 fn pull_config(ui: &AppWindow, c: &mut Config) {
@@ -115,6 +151,7 @@ fn pull_config(ui: &AppWindow, c: &mut Config) {
     c.hide_live = ui.get_hide_live();
     c.send_watch_history = ui.get_send_history();
     c.foryou_remember = ui.get_foryou_remember();
+    c.embedded_player = ui.get_embedded_player();
     c.quality = QUALITIES[ui.get_quality_index().clamp(0, 7) as usize];
     c.player = ui.get_player().to_string();
     c.window_effect = EFFECTS[ui.get_effect_index().clamp(0, 2) as usize].into();
@@ -289,12 +326,175 @@ fn load(ui: &AppWindow, state: &Arc<State>, page: i32, query: Option<String>) {
     });
 }
 
+/// Plays `list[index]` inside the app. Errors if libmpv can't start.
+fn play_embedded(
+    ui: &AppWindow,
+    state: &Arc<State>,
+    list: Vec<VideoItem>,
+    index: usize,
+) -> Result<(), String> {
+    let cfg = state.cfg();
+    let mut slot = state.player.lock().unwrap();
+    if slot.is_none() {
+        let (weak, pending) = (ui.as_weak(), state.frame_pending.clone());
+        let p = player::Player::new(
+            player::Options {
+                ytdl_path: Engine::exe(&cfg).display().to_string(),
+                ytdl_format: Engine::ytdl_format(&cfg),
+                ytdl_raw: Engine::ytdl_raw(&cfg),
+                volume: cfg.volume,
+                max_size: (1920, 1080),
+            },
+            move |frame| {
+                // The UI is still drawing the last frame: drop this one.
+                if pending.swap(true, Ordering::AcqRel) {
+                    return;
+                }
+                let pending = pending.clone();
+                let _ = weak.upgrade_in_event_loop(move |ui| {
+                    ui.set_player_frame(Image::from_rgba8(frame));
+                    pending.store(false, Ordering::Release);
+                });
+            },
+        )?;
+        *slot = Some(p);
+    }
+    let item = list[index].clone();
+    slot.as_ref().unwrap().load(&item.url())?;
+    drop(slot);
+
+    let back_to = match state.now.lock().unwrap().take() {
+        Some(prev) => prev.back_to,
+        None => ui.get_page(),
+    };
+    ui.set_player_frame(Image::default());
+    ui.set_player_title(item.title.clone().into());
+    ui.set_player_channel(item.channel.clone().into());
+    ui.set_player_progress(0.0);
+    ui.set_player_time("".into());
+    ui.set_player_status("Loading…".into());
+    ui.set_player_paused(false);
+    ui.set_player_has_next(index + 1 < list.len());
+    ui.set_page(5);
+    // "Up next" card: the thumbnail is already loaded if it's on screen.
+    if let Some(next) = list.get(index + 1) {
+        ui.set_player_next_title(next.title.clone().into());
+        let thumb = ui
+            .get_videos()
+            .iter()
+            .find(|v| v.id.as_str() == next.id)
+            .map(|v| v.thumb)
+            .unwrap_or_default();
+        ui.set_player_next_thumb(thumb);
+    }
+    ui.set_player_chapter("".into());
+    ui.set_player_chapters(ModelRc::new(VecModel::<f32>::default()));
+    ui.set_player_controls(true);
+    *state.last_activity.lock().unwrap() = std::time::Instant::now();
+    *state.now.lock().unwrap() = Some(NowPlaying {
+        list,
+        index,
+        furthest: 0.0,
+        back_to,
+        chapters_read: false,
+    });
+    let id = item.id.clone();
+    std::thread::spawn(move || Engine::mark_watched(&cfg, &id));
+    Ok(())
+}
+
+/// Stops the current video and tells the For You feed how much was watched.
+fn finish_current(state: &Arc<State>) -> Option<NowPlaying> {
+    let now = state.now.lock().unwrap().take()?;
+    if let Some(p) = state.player.lock().unwrap().as_ref() {
+        p.stop();
+    }
+    state.fy.lock().unwrap().watched(
+        now.item(),
+        std::time::Duration::from_secs_f64(now.furthest.max(0.0)),
+    );
+    Some(now)
+}
+
+fn close_player(ui: &AppWindow, state: &Arc<State>) {
+    let back = finish_current(state).map(|n| n.back_to).unwrap_or(0);
+    if ui.get_fullscreen() {
+        ui.window().set_fullscreen(false);
+        ui.set_fullscreen(false);
+    }
+    ui.set_player_frame(Image::default());
+    ui.set_page(back);
+    sync_foryou(ui, &state.fy.lock().unwrap());
+    // Home learns from what was just watched.
+    if back == 0 && session_home(&state.cfg()) {
+        load(ui, state, 0, None);
+    }
+}
+
+fn play_next(ui: &AppWindow, state: &Arc<State>) {
+    let Some(now) = finish_current(state) else {
+        return;
+    };
+    let next = now.index + 1;
+    if next >= now.list.len() {
+        *state.now.lock().unwrap() = Some(now);
+        close_player(ui, state);
+        return;
+    }
+    play_index(ui, state, now, next);
+}
+
+/// Switches the player to `list[index]`, keeping where "back" goes.
+fn play_index(ui: &AppWindow, state: &Arc<State>, now: NowPlaying, index: usize) {
+    let list = now.list.clone();
+    *state.now.lock().unwrap() = Some(NowPlaying {
+        furthest: 0.0,
+        chapters_read: false,
+        ..now
+    });
+    if let Err(e) = play_embedded(ui, state, list, index) {
+        ui.set_player_status(e.into());
+    }
+}
+
+/// Previous: restart the video, or (near its start) go to the one before.
+fn play_prev(ui: &AppWindow, state: &Arc<State>) {
+    let pos = state
+        .player
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|p| p.double("time-pos"))
+        .unwrap_or(0.0);
+    let index = state
+        .now
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|n| n.index)
+        .unwrap_or(0);
+    if pos > 3.0 || index == 0 {
+        if let Some(p) = state.player.lock().unwrap().as_ref() {
+            p.seek(0.0);
+        }
+        return;
+    }
+    if let Some(now) = finish_current(state) {
+        play_index(ui, state, now, index - 1);
+    }
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
     let (tx_placeholder, _) = mpsc::channel();
     let cfg = Config::load();
     let state = Arc::new(State {
         fy: Mutex::new(ForYou::load(cfg.foryou_remember)),
+        player: Mutex::new(None),
+        now: Mutex::new(None),
+        frame_pending: Arc::new(AtomicBool::new(false)),
+        last_activity: Mutex::new(std::time::Instant::now()),
+        sleep: Mutex::new(None),
         cfg: Mutex::new(cfg),
         items: Mutex::new(vec![]),
         generation: AtomicU64::new(0),
@@ -335,10 +535,19 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_play({
         let (weak, state) = (ui.as_weak(), state.clone());
         move |i| {
-            let Some(item) = state.items.lock().unwrap().get(i as usize).cloned() else {
+            let list = state.items.lock().unwrap().clone();
+            let Some(item) = list.get(i as usize).cloned() else {
                 return;
             };
             let cfg = state.cfg();
+            if cfg.embedded_player && player::available() {
+                let ui = weak.unwrap();
+                match play_embedded(&ui, &state, list, i as usize) {
+                    Ok(()) => return,
+                    // libmpv failed to start: fall through to the external player.
+                    Err(e) => ui.set_status(format!("Built-in player: {e}").into()),
+                }
+            }
             match Engine::play(&cfg, &item) {
                 Ok(playback) => {
                     let (cfg2, id) = (cfg.clone(), item.id.clone());
@@ -488,6 +697,232 @@ fn main() -> Result<(), slint::PlatformError> {
             load(&ui, &state, 0, None);
         }
     });
+
+    // ── Built-in player ───────────────────────────────────────────────────
+    ui.on_player_toggle({
+        let state = state.clone();
+        move || {
+            if let Some(p) = state.player.lock().unwrap().as_ref() {
+                p.set_flag("pause", !p.flag("pause"));
+            }
+        }
+    });
+    ui.on_player_seek({
+        let state = state.clone();
+        move |f| {
+            if let Some(p) = state.player.lock().unwrap().as_ref()
+                && let Some(d) = p.double("duration")
+            {
+                p.seek(d * f as f64);
+            }
+        }
+    });
+    ui.on_player_skip({
+        let state = state.clone();
+        move |d| {
+            if let Some(p) = state.player.lock().unwrap().as_ref() {
+                p.seek_by(d as f64);
+            }
+        }
+    });
+    ui.on_player_set_volume({
+        let (weak, state) = (ui.as_weak(), state.clone());
+        move |v| {
+            let v = v.clamp(0.0, 1.3);
+            weak.unwrap().set_player_volume(v);
+            if let Some(p) = state.player.lock().unwrap().as_ref() {
+                p.set_double("volume", v as f64 * 100.0);
+            }
+            let mut cfg = state.cfg.lock().unwrap();
+            cfg.volume = v as f64 * 100.0;
+            cfg.save();
+        }
+    });
+    ui.on_player_close({
+        let (weak, state) = (ui.as_weak(), state.clone());
+        move || close_player(&weak.unwrap(), &state)
+    });
+    ui.on_player_next({
+        let (weak, state) = (ui.as_weak(), state.clone());
+        move || play_next(&weak.unwrap(), &state)
+    });
+    ui.on_toggle_fullscreen({
+        let weak = ui.as_weak();
+        move || {
+            let ui = weak.unwrap();
+            let on = !ui.get_fullscreen();
+            ui.window().set_fullscreen(on);
+            ui.set_fullscreen(on);
+        }
+    });
+    ui.on_player_activity({
+        let (weak, state) = (ui.as_weak(), state.clone());
+        move || {
+            *state.last_activity.lock().unwrap() = std::time::Instant::now();
+            weak.unwrap().set_player_controls(true);
+        }
+    });
+    ui.on_player_prev({
+        let (weak, state) = (ui.as_weak(), state.clone());
+        move || play_prev(&weak.unwrap(), &state)
+    });
+    ui.on_player_toggle_captions({
+        let (weak, state) = (ui.as_weak(), state.clone());
+        move || {
+            let ui = weak.unwrap();
+            let on = !ui.get_player_captions();
+            ui.set_player_captions(on);
+            if let Some(p) = state.player.lock().unwrap().as_ref() {
+                p.set_string("sid", if on { "auto" } else { "no" });
+                if on && p.double("sid").is_none() && p.string("sid").as_deref() == Some("no") {
+                    ui.set_player_status("No captions for this video".into());
+                }
+            }
+        }
+    });
+    ui.on_player_set_speed({
+        let (weak, state) = (ui.as_weak(), state.clone());
+        move |sp| {
+            weak.unwrap().set_player_speed(sp);
+            if let Some(p) = state.player.lock().unwrap().as_ref() {
+                p.set_double("speed", sp as f64);
+            }
+        }
+    });
+    ui.on_player_set_quality({
+        let (weak, state) = (ui.as_weak(), state.clone());
+        move |i| {
+            let ui = weak.unwrap();
+            let i = i.clamp(0, 7);
+            ui.set_player_quality_index(i);
+            ui.set_quality_index(i);
+            let cfg = {
+                let mut cfg = state.cfg.lock().unwrap();
+                cfg.quality = QUALITIES[i as usize];
+                cfg.save();
+                cfg.clone()
+            };
+            let url = state.now.lock().unwrap().as_ref().map(|n| n.item().url());
+            if let (Some(p), Some(url)) = (state.player.lock().unwrap().as_ref(), url) {
+                let pos = p.double("time-pos").unwrap_or(0.0);
+                p.set_string("ytdl-format", &Engine::ytdl_format(&cfg));
+                if let Err(e) = p.load_at(&url, pos) {
+                    ui.set_player_status(e.into());
+                } else {
+                    ui.set_player_status("Switching quality…".into());
+                }
+            }
+        }
+    });
+    ui.on_player_set_sleep({
+        let (weak, state) = (ui.as_weak(), state.clone());
+        move |m| {
+            let ui = weak.unwrap();
+            let (sleep, label) = match m {
+                0 => (None, "Off".to_string()),
+                -1 => (Some(Sleep::EndOfVideo), "End of video".to_string()),
+                m => (
+                    Some(Sleep::At(
+                        std::time::Instant::now() + std::time::Duration::from_secs(m as u64 * 60),
+                    )),
+                    format!("{m} min"),
+                ),
+            };
+            *state.sleep.lock().unwrap() = sleep;
+            ui.set_player_sleep(label.into());
+        }
+    });
+
+    // Poll playback state for the controls, progress and autoplay.
+    let ticker = slint::Timer::default();
+    ticker.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_millis(250),
+        {
+            let (weak, state) = (ui.as_weak(), state.clone());
+            move || {
+                let Some(ui) = weak.upgrade() else { return };
+                if ui.get_page() != 5 {
+                    return;
+                }
+                let (pos, dur, paused, eof, err) = {
+                    let guard = state.player.lock().unwrap();
+                    let Some(p) = guard.as_ref() else { return };
+                    (
+                        p.double("time-pos"),
+                        p.double("duration"),
+                        p.flag("pause"),
+                        p.flag("eof-reached"),
+                        p.error(),
+                    )
+                };
+                if let Some(n) = state.now.lock().unwrap().as_mut()
+                    && let Some(t) = pos
+                {
+                    n.furthest = n.furthest.max(t);
+                }
+                ui.set_player_paused(paused);
+                match (pos, dur) {
+                    (Some(t), Some(d)) if d > 0.0 => {
+                        ui.set_player_progress((t / d).clamp(0.0, 1.0) as f32);
+                        ui.set_player_time(
+                            format!("{} / {}", player::fmt_time(t), player::fmt_time(d)).into(),
+                        );
+                        ui.set_player_status("".into());
+                    }
+                    (Some(t), _) => {
+                        ui.set_player_time(player::fmt_time(t).into());
+                        ui.set_player_status("".into());
+                    }
+                    _ => {}
+                }
+                if let Some(e) = err {
+                    ui.set_player_status(format!("Couldn't play this video: {e}").into());
+                }
+
+                // Chapters: marks once per video, the current title every tick.
+                if let Some(d) = dur.filter(|d| *d > 0.0) {
+                    let guard = state.player.lock().unwrap();
+                    if let Some(p) = guard.as_ref() {
+                        ui.set_player_chapter(p.chapter_title().unwrap_or_default().into());
+                        let mut now = state.now.lock().unwrap();
+                        if let Some(n) = now.as_mut()
+                            && !n.chapters_read
+                        {
+                            n.chapters_read = true;
+                            let marks: Vec<f32> =
+                                p.chapters().iter().map(|t| (t / d) as f32).collect();
+                            ui.set_player_chapters(ModelRc::new(Rc::new(VecModel::from(marks))));
+                        }
+                    }
+                }
+
+                // Controls hide after 3 s without input while playing.
+                let idle = state.last_activity.lock().unwrap().elapsed();
+                ui.set_player_controls(paused || ui.get_sheet() != 0 || idle.as_secs_f32() < 3.0);
+
+                // Sleep timer.
+                let sleep = *state.sleep.lock().unwrap();
+                if let Some(Sleep::At(t)) = sleep
+                    && std::time::Instant::now() >= t
+                {
+                    if let Some(p) = state.player.lock().unwrap().as_ref() {
+                        p.set_flag("pause", true);
+                    }
+                    *state.sleep.lock().unwrap() = None;
+                    ui.set_player_sleep("Off".into());
+                }
+                if eof {
+                    if let Some(Sleep::EndOfVideo) = sleep {
+                        *state.sleep.lock().unwrap() = None;
+                        ui.set_player_sleep("Off".into());
+                    } else if state.cfg().autoplay {
+                        play_next(&ui, &state);
+                    }
+                }
+            }
+        },
+    );
 
     ui.show()?;
     apply_window_effect(&ui, &state.cfg());

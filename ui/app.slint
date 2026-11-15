@@ -1,4 +1,4 @@
-import { LineEdit, Switch, Slider, ComboBox, Button, ScrollView } from "std-widgets.slint";
+﻿import { LineEdit, Switch, Slider, ComboBox, Button, ScrollView } from "std-widgets.slint";
 
 export struct Video {
     id: string,
@@ -29,6 +29,38 @@ export global Theme {
     out property <color> base: dark ? #0b0b10 : #f3f3f8;
     out property <color> panel: dark ? #191920 : #ffffff;
     out property <color> line: dark ? #ffffff18 : #0000001a;
+}
+
+// Vector icons (24x24 viewbox) so they render with any font.
+export global Icons {
+    out property <string> play: "M8 5 L19 12 L8 19 Z";
+    out property <string> pause: "M6 5 L10 5 L10 19 L6 19 Z M14 5 L18 5 L18 19 L14 19 Z";
+    out property <string> next: "M6 6 L15 12 L6 18 Z M16 6 L18 6 L18 18 L16 18 Z";
+    out property <string> prev: "M18 6 L9 12 L18 18 Z M6 6 L8 6 L8 18 L6 18 Z";
+    out property <string> chevron-down: "M6 9 L12 15 L18 9";
+    out property <string> chevron-right: "M9 6 L15 12 L9 18";
+    out property <string> fullscreen: "M4 9 L4 4 L9 4 M15 4 L20 4 L20 9 M20 15 L20 20 L15 20 M9 20 L4 20 L4 15";
+    out property <string> exit-fullscreen: "M9 4 L9 9 L4 9 M15 4 L15 9 L20 9 M20 15 L15 15 L15 20 M4 15 L9 15 L9 20";
+    out property <string> volume: "M4 9 L8 9 L13 5 L13 19 L8 15 L4 15 Z";
+    out property <string> home: "M4 11 L12 4 L20 11 L20 20 L14 20 L14 14 L10 14 L10 20 L4 20 Z";
+    out property <string> subs: "M4 7 L20 7 L20 19 L4 19 Z M7 4 L17 4 M10 10 L15 13 L10 16 Z";
+    out property <string> search: "M10.5 4 A6.5 6.5 0 1 1 10.49 4 M15.5 15.5 L20 20";
+    out property <string> history: "M4 12 A8 8 0 1 0 6.5 6.2 M4 4 L4 9 L9 9 M12 8 L12 12 L15 14";
+    out property <string> check: "M5 12 L10 17 L19 7";
+}
+
+component Icon inherits Path {
+    in property <string> d;
+    in property <bool> filled: true;
+    in property <color> tint: white;
+    commands: d;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    fill: filled ? tint : transparent;
+    stroke: filled ? transparent : tint;
+    stroke-width: filled ? 0px : 2px;
+    width: 22px;
+    height: 22px;
 }
 
 // The surface everything is built from: translucent "liquid glass" with a
@@ -86,6 +118,8 @@ component Aurora inherits Rectangle {
 component NavItem inherits Rectangle {
     in property <string> label;
     in property <string> glyph;
+    in property <string> icon;
+    in property <bool> filled: true;
     in property <bool> selected;
     callback clicked();
     height: 44px;
@@ -96,7 +130,8 @@ component NavItem inherits Rectangle {
     HorizontalLayout {
         padding-left: 14px;
         spacing: 14px;
-        Text { text: glyph; font-size: 18px; color: selected ? Theme.accent : Theme.fg; vertical-alignment: center; width: 20px; }
+        if icon != "": Icon { d: icon; filled: filled; tint: selected ? Theme.accent : Theme.fg; width: 20px; height: 20px; y: (parent.height - self.height) / 2; }
+        if icon == "": Text { text: glyph; font-size: 18px; color: selected ? Theme.accent : Theme.fg; vertical-alignment: center; width: 20px; }
         Text { text: label; font-size: 14px; font-weight: selected ? 700 : 500; color: Theme.fg; vertical-alignment: center; }
     }
 }
@@ -136,7 +171,7 @@ component Card inherits Rectangle {
                 height: 24px;
                 border-radius: 12px;
                 background: nope-ta.has-hover ? #000000e0 : #000000a8;
-                nope := Text { text: "✕  Not interested"; color: white; font-size: 12px; font-weight: 600; }
+                nope := Text { text: "âœ•  Not interested"; color: white; font-size: 12px; font-weight: 600; }
                 nope-ta := TouchArea { clicked => { root.dismiss(); } mouse-cursor: pointer; }
                 x: parent.width - self.width - 8px;
             }
@@ -159,7 +194,7 @@ component Card inherits Rectangle {
             overflow: elide;
             height: 38px;
         }
-        Text { text: video.channel + (video.meta != "" ? "  ·  " + video.meta : ""); color: Theme.muted; font-size: 12px; overflow: elide; }
+        Text { text: video.channel + (video.meta != "" ? "  Â·  " + video.meta : ""); color: Theme.muted; font-size: 12px; overflow: elide; }
     }
 }
 
@@ -234,10 +269,82 @@ component TopicPanel inherits Surface {
             Button { text: tuning ? "Save" : "Build my feed"; primary: true; clicked => { root.build(); } }
         }
         if !tuning && !signed-in: Text {
-            text: "Want your real YouTube recommendations instead? Connect your account in Settings → Account.";
+            text: "Want your real YouTube recommendations instead? Connect your account in Settings â†’ Account.";
             color: Theme.muted; font-size: 12px; horizontal-alignment: center; wrap: word-wrap;
         }
     }
+}
+
+component IconBtn inherits Rectangle {
+    in property <string> icon;
+    in property <bool> filled: true;
+    in property <length> size: 22px;
+    in property <length> pad: 9px;
+    in property <bool> ring;            // translucent circle behind (center controls)
+    callback clicked();
+    width: size + pad * 2;
+    height: self.width;
+    border-radius: self.width / 2;
+    background: ita.pressed ? #ffffff40 : (ita.has-hover ? #ffffff26 : (ring ? #00000059 : transparent));
+    animate background { duration: 120ms; }
+    Icon { d: icon; filled: filled; width: size; height: size; }
+    ita := TouchArea { clicked => { root.clicked(); } mouse-cursor: pointer; }
+}
+
+// Seek / volume bar: click or drag anywhere on it.
+component Scrub inherits Rectangle {
+    in property <float> value;     // 0..1
+    callback scrubbed(float);      // while dragging
+    callback committed(float);     // on release
+    property <float> shown: sta.pressed ? clamp(sta.mouse-x / self.width, 0, 1) : value;
+    height: 18px;
+    Rectangle {
+        y: (parent.height - self.height) / 2;
+        height: sta.has-hover || sta.pressed ? 6px : 4px;
+        border-radius: 3px;
+        background: #ffffff40;
+        Rectangle { x: 0; width: parent.width * shown; border-radius: 3px; background: Theme.accent; }
+    }
+    Rectangle {
+        x: parent.width * shown - self.width / 2;
+        y: (parent.height - self.height) / 2;
+        width: sta.has-hover || sta.pressed ? 14px : 0px;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: white;
+        animate width { duration: 100ms; }
+    }
+    sta := TouchArea {
+        mouse-cursor: pointer;
+        moved => { if (self.pressed) { root.scrubbed(clamp(self.mouse-x / root.width, 0, 1)); } }
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.up && e.button == PointerEventButton.left) {
+                root.committed(clamp(self.mouse-x / root.width, 0, 1));
+            }
+        }
+    }
+}
+
+component SheetRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <bool> chevron: true;
+    in property <bool> selected;
+    callback clicked();
+    height: 48px;
+    border-radius: 10px;
+    background: rta.has-hover ? #ffffff14 : transparent;
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 12px;
+        spacing: 10px;
+        Text { text: label; color: white; font-size: 15px; vertical-alignment: center; }
+        Rectangle { }
+        Text { text: value; color: #ffffffa0; font-size: 14px; vertical-alignment: center; }
+        if chevron: Icon { d: Icons.chevron-right; filled: false; tint: #ffffffa0; width: 18px; height: 18px; y: (parent.height - self.height) / 2; }
+        if selected: Icon { d: Icons.check; filled: false; tint: Theme.accent; width: 18px; height: 18px; y: (parent.height - self.height) / 2; }
+    }
+    rta := TouchArea { clicked => { root.clicked(); } mouse-cursor: pointer; }
 }
 
 component Row inherits HorizontalLayout {
@@ -277,6 +384,28 @@ export component AppWindow inherits Window {
     in-out property <[Topic]> topics;
     in-out property <bool> foryou-remember: true;
     in-out property <int> signal-count;
+    // Built-in player (page 5)
+    in-out property <image> player-frame;
+    in-out property <string> player-title;
+    in-out property <string> player-channel;
+    in-out property <float> player-progress;   // 0..1
+    in-out property <string> player-time;      // "1:02 / 10:00"
+    in-out property <bool> player-paused;
+    in-out property <float> player-volume: 1.0; // 0..1.3
+    in-out property <string> player-status;    // loading / error text over the video
+    in-out property <bool> player-has-next;
+    in-out property <bool> fullscreen;
+    in-out property <bool> embedded-player: true;
+    in-out property <bool> player-controls: true;  // overlay shown (auto-hides while playing)
+    in-out property <string> player-chapter;
+    in-out property <[float]> player-chapters;     // chapter starts, 0..1
+    in-out property <bool> player-captions;
+    in-out property <float> player-speed: 1.0;
+    in-out property <int> player-quality-index: 5;
+    in-out property <string> player-sleep: "Off";
+    in-out property <int> sheet: 0;                // 0 closed, 1 menu, 2 quality, 3 speed, 4 sleep
+    in-out property <string> player-next-title;
+    in-out property <image> player-next-thumb;
 
     callback open-page(int);
     callback search(string);
@@ -293,6 +422,19 @@ export component AppWindow inherits Window {
     callback open-tune();
     callback not-interested(int);
     callback set-home-session(bool);
+    callback player-toggle();
+    callback player-seek(float);     // 0..1
+    callback player-skip(float);     // seconds, relative
+    callback player-close();
+    callback player-set-volume(float);
+    callback player-next();
+    callback toggle-fullscreen();
+    callback player-activity();
+    callback player-prev();
+    callback player-toggle-captions();
+    callback player-set-speed(float);
+    callback player-set-quality(int);
+    callback player-set-sleep(int);    // minutes; 0 off, -1 end of video
 
     property <length> gap: 20px;
     property <int> auto-cols: max(1, ceil(content.width / 360px));
@@ -305,28 +447,28 @@ export component AppWindow inherits Window {
     Aurora { }
 
     HorizontalLayout {
-        padding: 12px;
+        padding: page == 5 && fullscreen ? 0px : 12px;
         spacing: 12px;
 
-        Surface {
+        if !(page == 5 && fullscreen): Surface {
             width: 220px;
             strength: 1.2;
             VerticalLayout {
                 padding: 12px;
                 spacing: 4px;
                 Text { text: "Null YT"; font-size: 22px; font-weight: 900; color: Theme.fg; height: 56px; vertical-alignment: center; x: 14px; }
-                NavItem { label: "Home"; glyph: "⌂"; selected: page == 0; clicked => { open-page(0); } }
-                NavItem { label: "Subscriptions"; glyph: "▤"; selected: page == 1; clicked => { open-page(1); } }
-                NavItem { label: "Search"; glyph: "⌕"; selected: page == 2; clicked => { open-page(2); } }
-                NavItem { label: "History"; glyph: "↺"; selected: page == 3; clicked => { open-page(3); } }
+                NavItem { label: "Home"; icon: Icons.home; selected: page == 0; clicked => { open-page(0); } }
+                NavItem { label: "Subscriptions"; icon: Icons.subs; filled: false; selected: page == 1; clicked => { open-page(1); } }
+                NavItem { label: "Search"; icon: Icons.search; filled: false; selected: page == 2; clicked => { open-page(2); } }
+                NavItem { label: "History"; icon: Icons.history; filled: false; selected: page == 3; clicked => { open-page(3); } }
                 Rectangle { }
-                NavItem { label: "Settings"; glyph: "⚙"; selected: page == 4; clicked => { open-page(4); } }
+                NavItem { label: "Settings"; glyph: "âš™"; selected: page == 4; clicked => { open-page(4); } }
             }
         }
 
         content := Rectangle {
-            // ── Feeds ──────────────────────────────────────────────────
-            if page != 4: VerticalLayout {
+            // â”€â”€ Feeds â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            if page != 4 && page != 5: VerticalLayout {
                 padding-top: 16px;
                 spacing: 12px;
                 HorizontalLayout {
@@ -392,7 +534,239 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // ── Settings ───────────────────────────────────────────────
+            // â”€â”€ Player â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            if page == 5: Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                border-radius: fullscreen ? 0px : Theme.radius;
+                clip: true;
+                background: black;
+                keys := FocusScope {
+                    init => { self.focus(); }
+                    key-pressed(e) => {
+                        player-activity();
+                        if (e.text == " " || e.text == "k") { player-toggle(); return accept; }
+                        if (e.text == Key.LeftArrow || e.text == "j") { player-skip(-10); return accept; }
+                        if (e.text == Key.RightArrow || e.text == "l") { player-skip(10); return accept; }
+                        if (e.text == Key.UpArrow) { player-set-volume(min(1.3, player-volume + 0.05)); return accept; }
+                        if (e.text == Key.DownArrow) { player-set-volume(max(0, player-volume - 0.05)); return accept; }
+                        if (e.text == "f") { toggle-fullscreen(); return accept; }
+                        if (e.text == "c") { player-toggle-captions(); return accept; }
+                        if (e.text == "n") { player-next(); return accept; }
+                        if (e.text == "p") { player-prev(); return accept; }
+                        if (e.text == Key.Escape) {
+                            if (sheet != 0) { sheet = 0; } else if (fullscreen) { toggle-fullscreen(); } else { player-close(); }
+                            return accept;
+                        }
+                        reject
+                    }
+
+                    Image { source: player-frame; image-fit: contain; width: 100%; height: 100%; }
+
+                    // Anywhere on the video: move shows the controls, click
+                    // shows/hides them (or pauses when they're already up),
+                    // double-click toggles fullscreen.
+                    TouchArea {
+                        mouse-cursor: player-controls ? MouseCursor.default : MouseCursor.none;
+                        moved => { player-activity(); }
+                        clicked => {
+                            keys.focus();
+                            if (player-controls) { player-toggle(); }
+                            player-activity();
+                        }
+                        double-clicked => { toggle-fullscreen(); }
+                        pointer-event(e) => { if (e.kind == PointerEventKind.move) { player-activity(); } }
+                    }
+
+                    if player-status != "": Rectangle {
+                        width: st.preferred-width + 40px;
+                        height: 44px;
+                        border-radius: 22px;
+                        background: #000000b0;
+                        st := Text { text: player-status; color: white; font-size: 14px; }
+                    }
+
+                    // â”€â”€ Overlay â”€â”€
+                    Rectangle {
+                        opacity: player-controls || sheet != 0 ? 1 : 0;
+                        visible: self.opacity > 0.01;
+                        animate opacity { duration: 180ms; }
+                        background: #00000070;
+
+                        // Top: chevron, title / channel, captions, settings
+                        HorizontalLayout {
+                            y: 0;
+                            height: 76px;
+                            padding: 14px;
+                            padding-left: 10px;
+                            spacing: 6px;
+                            IconBtn { icon: Icons.chevron-down; filled: false; size: 26px; clicked => { player-close(); } }
+                            VerticalLayout {
+                                alignment: center;
+                                Text { text: player-title; color: white; font-size: fullscreen ? 22px : 17px; font-weight: 800; overflow: elide; }
+                                Text { text: player-channel; color: #ffffffb8; font-size: 13px; overflow: elide; }
+                            }
+                            // CC badge
+                            Rectangle {
+                                width: 44px;
+                                height: 44px;
+                                border-radius: 22px;
+                                background: cca.has-hover ? #ffffff26 : transparent;
+                                y: (parent.height - parent.padding * 2 - self.height) / 2;
+                                Rectangle {
+                                    width: 28px;
+                                    height: 20px;
+                                    border-radius: 4px;
+                                    border-width: 2px;
+                                    border-color: white;
+                                    background: player-captions ? white : transparent;
+                                    Text { text: "CC"; font-size: 10px; font-weight: 900; color: player-captions ? black : white; }
+                                }
+                                cca := TouchArea { clicked => { player-toggle-captions(); keys.focus(); } mouse-cursor: pointer; }
+                            }
+                            Rectangle {
+                                width: 44px;
+                                height: 44px;
+                                border-radius: 22px;
+                                background: gea.has-hover ? #ffffff26 : transparent;
+                                Text { text: "âš™"; color: white; font-size: 22px; }
+                                gea := TouchArea { clicked => { sheet = sheet == 0 ? 1 : 0; } mouse-cursor: pointer; }
+                            }
+                        }
+
+                        // Center: previous, play/pause, next
+                        play-btn := IconBtn {
+                            icon: player-paused ? Icons.play : Icons.pause; ring: true; size: 38px; pad: 23px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            clicked => { player-toggle(); keys.focus(); }
+                        }
+                        IconBtn {
+                            icon: Icons.prev; ring: true; size: 26px; pad: 18px;
+                            x: play-btn.x - min(160px, parent.width / 7) - self.width / 2 + play-btn.width / 2;
+                            y: (parent.height - self.height) / 2;
+                            clicked => { player-prev(); keys.focus(); }
+                        }
+                        IconBtn {
+                            icon: Icons.next; ring: true; size: 26px; pad: 18px;
+                            x: play-btn.x + min(160px, parent.width / 7) - self.width / 2 + play-btn.width / 2;
+                            y: (parent.height - self.height) / 2;
+                            clicked => { player-next(); keys.focus(); }
+                        }
+
+                        // Up next card (bottom right, above the bar)
+                        if player-has-next: Rectangle {
+                            x: parent.width - self.width - 18px;
+                            y: parent.height - self.height - 74px;
+                            width: 300px;
+                            height: 64px;
+                            border-radius: 14px;
+                            background: una.has-hover ? #ffffff2a : #00000090;
+                            border-width: 1px;
+                            border-color: #ffffff30;
+                            HorizontalLayout {
+                                padding: 8px;
+                                spacing: 10px;
+                                Rectangle {
+                                    width: 85px;
+                                    border-radius: 8px;
+                                    clip: true;
+                                    background: #ffffff14;
+                                    Image { source: player-next-thumb; image-fit: cover; width: 100%; height: 100%; }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    Text { text: "Up next"; color: #ffffffa0; font-size: 11px; font-weight: 700; }
+                                    Text { text: player-next-title; color: white; font-size: 13px; font-weight: 600; overflow: elide; }
+                                }
+                            }
+                            una := TouchArea { clicked => { player-next(); keys.focus(); } mouse-cursor: pointer; }
+                        }
+
+                        // Bottom: time Â· chapter, volume, fullscreen, then the bar
+                        VerticalLayout {
+                            y: parent.height - self.height;
+                            height: 74px;
+                            padding-left: 20px;
+                            padding-right: 20px;
+                            padding-bottom: 8px;
+                            spacing: 2px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                height: 44px;
+                                Text { text: player-time; color: white; font-size: 15px; vertical-alignment: center; }
+                                if player-chapter != "": Text { text: "Â·  " + player-chapter; color: white; font-size: 15px; vertical-alignment: center; overflow: elide; }
+                                Rectangle { }
+                                Icon { d: Icons.volume; width: 20px; height: 20px; y: (parent.height - self.height) / 2; }
+                                Scrub {
+                                    width: 110px;
+                                    value: player-volume / 1.3;
+                                    scrubbed(v) => { player-set-volume(v * 1.3); }
+                                    committed(v) => { player-set-volume(v * 1.3); keys.focus(); }
+                                }
+                                IconBtn { icon: fullscreen ? Icons.exit-fullscreen : Icons.fullscreen; filled: false; clicked => { toggle-fullscreen(); keys.focus(); } }
+                            }
+                            Rectangle {
+                                height: 18px;
+                                Scrub {
+                                    value: player-progress;
+                                    scrubbed(v) => { player-activity(); }
+                                    committed(v) => { player-seek(v); keys.focus(); }
+                                }
+                                // Chapter gaps, like a segmented bar.
+                                for c in player-chapters: Rectangle {
+                                    x: parent.width * c - 1.5px;
+                                    width: c > 0 ? 3px : 0px;
+                                    y: (parent.height - 8px) / 2;
+                                    height: 8px;
+                                    background: black;
+                                }
+                            }
+                        }
+                    }
+
+                    // â”€â”€ Settings sheet â”€â”€
+                    if sheet != 0: Rectangle {
+                        background: #00000060;
+                        TouchArea { clicked => { sheet = 0; keys.focus(); } }
+                        Rectangle {
+                            width: min(parent.width - 40px, 520px);
+                            height: sheet-lay.preferred-height;
+                            y: parent.height - self.height - 24px;
+                            border-radius: 18px;
+                            background: #141418;
+                            border-width: 1px;
+                            border-color: #ffffff20;
+                            TouchArea { }
+                            sheet-lay := VerticalLayout {
+                                padding: 12px;
+                                spacing: 2px;
+                                Rectangle { height: 14px; Rectangle { width: 44px; height: 4px; border-radius: 2px; background: #ffffff50; } }
+                                if sheet == 1: SheetRow { label: "Quality"; value: ["144p", "240p", "360p", "480p", "720p", "1080p", "1440p", "2160p"][player-quality-index]; clicked => { sheet = 2; } }
+                                if sheet == 1: SheetRow { label: "Playback speed"; value: player-speed == 1 ? "Normal" : player-speed + "Ã—"; clicked => { sheet = 3; } }
+                                if sheet == 1: SheetRow { label: "Captions"; value: player-captions ? "On" : "Off"; chevron: false; clicked => { player-toggle-captions(); } }
+                                if sheet == 1: SheetRow { label: "Sleep timer"; value: player-sleep; clicked => { sheet = 4; } }
+                                if sheet == 2: VerticalLayout { spacing: 2px; for q[i] in ["144p", "240p", "360p", "480p", "720p", "1080p", "1440p", "2160p"]: SheetRow {
+                                    label: q; chevron: false; selected: i == player-quality-index;
+                                    clicked => { player-set-quality(i); sheet = 0; keys.focus(); }
+                                } }
+                                if sheet == 3: VerticalLayout { spacing: 2px; for sp in [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]: SheetRow {
+                                    label: sp == 1 ? "Normal" : sp + "Ã—"; chevron: false; selected: sp == player-speed;
+                                    clicked => { player-set-speed(sp); sheet = 0; keys.focus(); }
+                                } }
+                                if sheet == 4: VerticalLayout { spacing: 2px; for m[i] in [0, 15, 30, 45, 60, -1]: SheetRow {
+                                    label: m == 0 ? "Off" : (m == -1 ? "End of video" : m + " minutes"); chevron: false;
+                                    clicked => { player-set-sleep(m); sheet = 0; keys.focus(); }
+                                } }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // â”€â”€ Settings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             if page == 4: ScrollView {
                 VerticalLayout {
                     padding: 24px;
@@ -450,7 +824,8 @@ export component AppWindow inherits Window {
                                     selected => { settings-changed(); }
                                 }
                             }
-                            Row { label: "Player command"; LineEdit { text <=> player; edited => { settings-changed(); } } }
+                            Row { label: "Built-in player (libmpv)"; Switch { checked <=> embedded-player; toggled => { settings-changed(); } } }
+                            Row { label: "External player command"; LineEdit { text <=> player; edited => { settings-changed(); } } }
                         }
                     }
 
