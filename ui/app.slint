@@ -10,6 +10,11 @@ export struct Video {
     thumb: image,
 }
 
+export struct Topic {
+    name: string,
+    picked: bool,
+}
+
 export global Theme {
     in-out property <bool> glass: true;
     in-out property <bool> dark: true;
@@ -98,8 +103,19 @@ component NavItem inherits Rectangle {
 
 component Card inherits Rectangle {
     in property <Video> video;
+    in property <bool> dismissable;
     callback clicked();
-    ta := TouchArea { clicked => { root.clicked(); } mouse-cursor: pointer; }
+    callback dismiss();
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+        mouse-cursor: pointer;
+        // Right-click: Not interested.
+        pointer-event(e) => {
+            if (root.dismissable && e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                root.dismiss();
+            }
+        }
+    }
     VerticalLayout {
         spacing: 10px;
         thumb := Rectangle {
@@ -111,6 +127,18 @@ component Card inherits Rectangle {
             Rectangle {
                 background: ta.has-hover ? #00000030 : #00000000;
                 animate background { duration: 150ms; }
+            }
+            // Stays up while the pointer is on the card or on the pill itself.
+            Rectangle {
+                visible: dismissable && (ta.has-hover || nope-ta.has-hover);
+                y: 8px;
+                width: nope.preferred-width + 16px;
+                height: 24px;
+                border-radius: 12px;
+                background: nope-ta.has-hover ? #000000e0 : #000000a8;
+                nope := Text { text: "✕  Not interested"; color: white; font-size: 12px; font-weight: 600; }
+                nope-ta := TouchArea { clicked => { root.dismiss(); } mouse-cursor: pointer; }
+                x: parent.width - self.width - 8px;
             }
             if video.duration != "" || video.live: Rectangle {
                 x: parent.width - self.width - 8px;
@@ -147,6 +175,71 @@ component Swatch inherits Rectangle {
     TouchArea { clicked => { root.picked(root.c); } mouse-cursor: pointer; }
 }
 
+component Chip inherits Rectangle {
+    in property <string> label;
+    in property <bool> on;
+    callback clicked();
+    height: 36px;
+    border-radius: 18px;
+    background: on ? Theme.accent : (cta.has-hover ? Theme.fg.with-alpha(0.14) : Theme.fg.with-alpha(0.08));
+    border-width: 1px;
+    border-color: on ? Theme.accent : Theme.line;
+    animate background { duration: 120ms; }
+    Text { text: label; color: on ? white : Theme.fg; font-size: 14px; font-weight: on ? 700 : 500; horizontal-alignment: center; vertical-alignment: center; }
+    cta := TouchArea { clicked => { root.clicked(); } mouse-cursor: pointer; }
+}
+
+// Topic picker: the welcome screen of the session feed, and its "Tune" dialog.
+component TopicPanel inherits Surface {
+    in property <string> heading;
+    in property <string> body;
+    in property <[Topic]> topics;
+    in property <bool> tuning;
+    in property <bool> signed-in;
+    callback toggle(int);
+    callback build();
+    callback start-fresh();
+    callback cancel();
+    property <int> per-row: 6;
+    property <length> chip-w: 108px;
+    property <length> chip-gap: 10px;
+    width: per-row * chip-w + (per-row - 1) * chip-gap + 64px;
+    height: lay.preferred-height;
+    // As a dialog over a busy feed, glass would be unreadable: go solid.
+    background: tuning || !Theme.glass ? Theme.panel
+        : @linear-gradient(135deg,
+            Theme.dark ? rgba(255, 255, 255, Theme.tint * 1.6) : rgba(255, 255, 255, 0.55) 0%,
+            Theme.dark ? rgba(255, 255, 255, Theme.tint * 0.4) : rgba(255, 255, 255, 0.30) 100%);
+    lay := VerticalLayout {
+        padding: 32px;
+        spacing: 16px;
+        Text { text: heading; font-size: 28px; font-weight: 800; color: Theme.fg; horizontal-alignment: center; }
+        Text { text: body; color: Theme.fg.with-alpha(0.85); font-size: 15px; wrap: word-wrap; horizontal-alignment: center; }
+        Rectangle {
+            height: ceil(topics.length / per-row) * (36px + chip-gap) - chip-gap;
+            for t[i] in topics: Chip {
+                label: t.name;
+                on: t.picked;
+                width: chip-w;
+                x: mod(i, per-row) * (chip-w + chip-gap);
+                y: floor(i / per-row) * (36px + chip-gap);
+                clicked => { root.toggle(i); }
+            }
+        }
+        HorizontalLayout {
+            alignment: center;
+            spacing: 10px;
+            if tuning: Button { text: "Start fresh"; clicked => { root.start-fresh(); } }
+            if tuning: Button { text: "Cancel"; clicked => { root.cancel(); } }
+            Button { text: tuning ? "Save" : "Build my feed"; primary: true; clicked => { root.build(); } }
+        }
+        if !tuning && !signed-in: Text {
+            text: "Want your real YouTube recommendations instead? Connect your account in Settings → Account.";
+            color: Theme.muted; font-size: 12px; horizontal-alignment: center; wrap: word-wrap;
+        }
+    }
+}
+
 component Row inherits HorizontalLayout {
     in property <string> label;
     spacing: 16px;
@@ -177,6 +270,13 @@ export component AppWindow inherits Window {
     in-out property <string> player: "mpv";
     in-out property <int> effect-index: 0;
     in-out property <string> blocked: "";
+    // Session "For you" feed
+    in-out property <bool> session-home;      // Home is showing the session mix
+    in-out property <bool> show-welcome;      // no taste yet: topic picker instead of a feed
+    in-out property <bool> tune-open;
+    in-out property <[Topic]> topics;
+    in-out property <bool> foryou-remember: true;
+    in-out property <int> signal-count;
 
     callback open-page(int);
     callback search(string);
@@ -186,6 +286,13 @@ export component AppWindow inherits Window {
     callback use-browser(string);
     callback import-cookies();
     callback sign-out();
+    callback toggle-topic(int);
+    callback save-topics();
+    callback start-fresh();
+    callback cancel-tune();
+    callback open-tune();
+    callback not-interested(int);
+    callback set-home-session(bool);
 
     property <length> gap: 20px;
     property <int> auto-cols: max(1, ceil(content.width / 360px));
@@ -193,6 +300,7 @@ export component AppWindow inherits Window {
     property <length> card-w: (content.width - gap * (cols + 1)) / cols;
     property <length> card-h: card-w * 9 / 16 + 90px;
     property <[string]> titles: ["For you", "Subscriptions", "Search", "History", "Settings"];
+    property <bool> welcome: page == 0 && session-home && show-welcome;
 
     Aurora { }
 
@@ -225,8 +333,22 @@ export component AppWindow inherits Window {
                     padding-left: gap;
                     padding-right: gap;
                     spacing: 12px;
-                    Text { text: titles[page]; font-size: 36px; font-weight: 800; color: Theme.fg; letter-spacing: -1px; }
+                    VerticalLayout {
+                        alignment: center;
+                        Text { text: titles[page]; font-size: 36px; font-weight: 800; color: Theme.fg; letter-spacing: -1px; }
+                        if page == 0: Text {
+                            text: session-home ? "Learns from what you watch, search and skip in this session" : "Synced with your YouTube account";
+                            color: Theme.muted; font-size: 13px;
+                        }
+                    }
                     Rectangle { }
+                    if page == 0 && signed-in: HorizontalLayout {
+                        spacing: 6px;
+                        alignment: center;
+                        Chip { label: "YouTube"; on: !session-home; width: 96px; clicked => { set-home-session(false); } }
+                        Chip { label: "Session mix"; on: session-home; width: 116px; clicked => { set-home-session(true); } }
+                    }
+                    if page == 0 && session-home && !show-welcome: Button { text: "Topics"; clicked => { open-tune(); } }
                     if page == 2: Surface {
                         width: 420px;
                         r: 999px;
@@ -244,7 +366,17 @@ export component AppWindow inherits Window {
                     height: 48px;
                     Text { text: status; color: Theme.fg; wrap: word-wrap; x: 16px; width: parent.width - 32px; vertical-alignment: center; }
                 }
-                ScrollView {
+                if welcome: Rectangle {
+                    TopicPanel {
+                        heading: "Your feed, no account needed";
+                        body: "Watch or search anything and Home becomes a For You feed that follows what you're into right now, the way YouTube does for a signed-out session. Pick a few topics to start, or just search.";
+                        topics: topics;
+                        signed-in: signed-in;
+                        toggle(i) => { toggle-topic(i); }
+                        build => { save-topics(); }
+                    }
+                }
+                if !welcome: ScrollView {
                     content-height: ceil(videos.length / cols) * (card-h + gap) + gap;
                     content-width: self.visible-width;
                     for v[i] in videos: Card {
@@ -253,7 +385,9 @@ export component AppWindow inherits Window {
                         y: gap + floor(i / cols) * (card-h + gap);
                         width: card-w;
                         height: card-h;
+                        dismissable: page == 0 && session-home;
                         clicked => { play(i); }
+                        dismiss => { not-interested(i); }
                     }
                 }
             }
@@ -343,6 +477,41 @@ export component AppWindow inherits Window {
                             Row { label: "Send watch history"; Switch { checked <=> send-history; toggled => { settings-changed(); } } }
                         }
                     }
+
+                    Surface {
+                        VerticalLayout {
+                            padding: 20px;
+                            spacing: 14px;
+                            Text { text: "For you (session feed)"; font-size: 20px; font-weight: 700; color: Theme.fg; }
+                            Text {
+                                text: "Home builds its own recommendations from what you watch, search and skip here, no account needed. Recent actions count most.";
+                                color: Theme.muted; wrap: word-wrap; font-size: 12px;
+                            }
+                            Row { label: "Remember between launches"; Switch { checked <=> foryou-remember; toggled => { settings-changed(); } } }
+                            HorizontalLayout {
+                                spacing: 12px;
+                                Text { text: signal-count + " signals so far"; color: Theme.muted; font-size: 13px; vertical-alignment: center; }
+                                Button { text: "Start fresh"; clicked => { start-fresh(); } }
+                                Rectangle { }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if tune-open: Rectangle {
+                background: #000000a8;
+                TouchArea { }
+                TopicPanel {
+                    heading: "Tune your feed";
+                    body: "Topics give the feed a head start. What you watch quickly outweighs them.";
+                    topics: topics;
+                    tuning: true;
+                    signed-in: signed-in;
+                    toggle(i) => { toggle-topic(i); }
+                    build => { save-topics(); }
+                    start-fresh => { start-fresh(); }
+                    cancel => { cancel-tune(); }
                 }
             }
 

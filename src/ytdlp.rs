@@ -3,6 +3,7 @@
 //! the same YouTube sync behaviour.
 
 use crate::config::{Account, Config};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -34,11 +35,13 @@ impl Feed {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VideoItem {
     pub id: String,
     pub title: String,
     pub channel: String,
+    #[serde(default)]
+    pub channel_id: Option<String>,
     pub thumbnail: String,
     pub duration: Option<f64>,
     pub views: Option<u64>,
@@ -72,6 +75,10 @@ impl VideoItem {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .into(),
+            channel_id: v
+                .get("channel_id")
+                .and_then(Value::as_str)
+                .map(String::from),
             duration: v.get("duration").and_then(Value::as_f64),
             views: v
                 .get("view_count")
@@ -82,6 +89,13 @@ impl VideoItem {
             thumbnail,
             id,
         })
+    }
+
+    /// Groups videos by channel (id when known, else the name).
+    pub fn channel_key(&self) -> String {
+        self.channel_id
+            .clone()
+            .unwrap_or_else(|| self.channel.clone())
     }
 
     pub fn url(&self) -> String {
@@ -204,10 +218,14 @@ impl Engine {
     }
 
     pub fn search(cfg: &Config, q: &str) -> Result<Vec<VideoItem>, String> {
-        Self::list(cfg, &[format!("ytsearch40:{q}")])
+        Self::search_n(cfg, q, 40)
     }
 
-    fn filter(cfg: &Config, items: Vec<VideoItem>) -> Vec<VideoItem> {
+    pub fn search_n(cfg: &Config, q: &str, n: u32) -> Result<Vec<VideoItem>, String> {
+        Self::list(cfg, &[format!("ytsearch{n}:{q}")])
+    }
+
+    pub fn filter(cfg: &Config, items: Vec<VideoItem>) -> Vec<VideoItem> {
         let kw: Vec<String> = cfg
             .blocked_keywords
             .iter()
@@ -240,9 +258,23 @@ impl Engine {
         );
     }
 
-    /// Launches mpv (or compatible) pointed at our yt-dlp + session.
-    pub fn play(cfg: &Config, item: &VideoItem) -> Result<(), String> {
+    /// Launches mpv (or compatible) pointed at our yt-dlp + session, and
+    /// returns how long the viewer watched once the player closes (blocking).
+    pub fn play(cfg: &Config, item: &VideoItem) -> Result<Playback, String> {
         let mut c = Command::new(&cfg.player);
+        // mpv saves the position it was closed at into a private folder, which
+        // is how we learn how far the viewer got (for the For You feed).
+        let is_mpv = std::path::Path::new(&cfg.player)
+            .file_stem()
+            .is_some_and(|s| s.to_string_lossy().to_lowercase().contains("mpv"));
+        let later =
+            std::env::temp_dir().join(format!("nullyt-watch-{}-{}", std::process::id(), item.id));
+        if is_mpv {
+            let _ = std::fs::remove_dir_all(&later);
+            c.arg("--save-position-on-quit")
+                .arg(format!("--watch-later-dir={}", later.display()))
+                .arg("--watch-later-options=start");
+        }
         c.arg(format!(
             "--script-opts=ytdl_hook-ytdl_path={}",
             Self::exe(cfg).display()
@@ -258,13 +290,58 @@ impl Engine {
         if !raw.is_empty() {
             c.arg(format!("--ytdl-raw-options={}", raw.join(",")));
         }
-        c.arg(item.url()).spawn().map(|_| ()).map_err(|e| {
+        let child = c.arg(item.url()).spawn().map_err(|e| {
             format!(
                 "couldn't start player \"{}\": {e}. Set the player path in Settings.",
                 cfg.player
             )
+        })?;
+        Ok(Playback {
+            child,
+            started: std::time::Instant::now(),
+            later: is_mpv.then_some(later),
+            duration: item.duration,
         })
     }
+}
+
+/// A running player.
+pub struct Playback {
+    child: std::process::Child,
+    started: std::time::Instant,
+    later: Option<PathBuf>,
+    duration: Option<f64>,
+}
+
+impl Playback {
+    /// Waits for the player to close and estimates how much was watched: the
+    /// position mpv saved on quit, or (if it played to the end and saved
+    /// nothing) the time it was open, capped at the video's length.
+    pub fn wait(mut self) -> std::time::Duration {
+        let _ = self.child.wait();
+        let open = self.started.elapsed().as_secs_f64();
+        let saved = self.later.as_ref().and_then(|dir| {
+            let pos = std::fs::read_dir(dir)
+                .ok()?
+                .flatten()
+                .find_map(|f| saved_position(&std::fs::read_to_string(f.path()).ok()?));
+            let _ = std::fs::remove_dir_all(dir);
+            pos
+        });
+        let secs = saved.unwrap_or_else(|| match self.duration {
+            // No saved position: either it finished, or (live / unknown length) wall time.
+            Some(len) if open >= len * 0.8 => len,
+            Some(len) => open.min(len),
+            None => open,
+        });
+        std::time::Duration::from_secs_f64(secs.max(0.0))
+    }
+}
+
+/// `start=123.45` from an mpv watch-later file.
+pub fn saved_position(text: &str) -> Option<f64> {
+    text.lines()
+        .find_map(|l| l.strip_prefix("start=")?.trim().parse().ok())
 }
 
 pub fn fmt_count(n: u64) -> String {
@@ -283,5 +360,25 @@ pub fn fmt_duration(s: f64) -> String {
         format!("{h}:{m:02}:{s:02}")
     } else {
         format!("{m}:{s:02}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_mpv_saved_position() {
+        let file = "# https://www.youtube.com/watch?v=abc
+start=123.456000
+";
+        assert_eq!(saved_position(file), Some(123.456));
+        assert_eq!(
+            saved_position(
+                "volume=50
+"
+            ),
+            None
+        );
     }
 }

@@ -32,6 +32,11 @@ pub struct Config {
     pub hide_live: bool,
     pub blocked_keywords: Vec<String>,
     pub feed_size: u32,
+    /// Home when signed in: "youtube" (your YouTube feed) or "session"
+    /// (Null YT's own For You mix). Signed out it's always the session mix.
+    pub home_source: String,
+    /// Keep the session feed's taste between launches.
+    pub foryou_remember: bool,
     // Player
     pub quality: u32,
     pub player: String,
@@ -58,6 +63,8 @@ impl Default for Config {
             hide_live: false,
             blocked_keywords: vec![],
             feed_size: 60,
+            home_source: "youtube".into(),
+            foryou_remember: true,
             quality: 1080,
             player: "mpv".into(),
             account: Account::SignedOut,

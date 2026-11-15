@@ -1,9 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
+mod foryou;
 mod ytdlp;
 
 use config::{Account, Config};
+use foryou::{ForYou, TOPICS};
 use slint::{
     Color, ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel,
 };
@@ -19,6 +21,8 @@ const EFFECTS: [&str; 3] = ["none", "mica", "acrylic"];
 
 struct State {
     cfg: Mutex<Config>,
+    /// Taste for the session "For you" feed.
+    fy: Mutex<ForYou>,
     items: Mutex<Vec<VideoItem>>,
     /// Bumped on every feed load so late thumbnails for an old feed are dropped.
     generation: AtomicU64,
@@ -29,6 +33,27 @@ impl State {
     fn cfg(&self) -> Config {
         self.cfg.lock().unwrap().clone()
     }
+}
+
+/// Home shows Null YT's own session mix (always when signed out).
+fn session_home(c: &Config) -> bool {
+    c.account == Account::SignedOut || c.home_source == "session"
+}
+
+/// Mirrors the For You state into the UI: welcome screen, topic chips,
+/// signal count.
+fn sync_foryou(ui: &AppWindow, fy: &ForYou) {
+    ui.set_show_welcome(!fy.has_taste());
+    ui.set_signal_count(fy.signals.len() as i32);
+    let picked = fy.interests();
+    let topics: Vec<Topic> = TOPICS
+        .iter()
+        .map(|t| Topic {
+            name: (*t).into(),
+            picked: picked.iter().any(|p| p == t),
+        })
+        .collect();
+    ui.set_topics(ModelRc::new(Rc::new(VecModel::from(topics))));
 }
 
 fn hex_to_color(s: &str) -> Color {
@@ -72,6 +97,8 @@ fn push_config(ui: &AppWindow, c: &Config) {
     ui.set_blocked(c.blocked_keywords.join(", ").into());
     ui.set_account_label(account_label(&c.account).into());
     ui.set_signed_in(c.account != Account::SignedOut);
+    ui.set_session_home(session_home(c));
+    ui.set_foryou_remember(c.foryou_remember);
 }
 
 fn pull_config(ui: &AppWindow, c: &mut Config) {
@@ -87,6 +114,7 @@ fn pull_config(ui: &AppWindow, c: &mut Config) {
     c.hide_shorts = ui.get_hide_shorts();
     c.hide_live = ui.get_hide_live();
     c.send_watch_history = ui.get_send_history();
+    c.foryou_remember = ui.get_foryou_remember();
     c.quality = QUALITIES[ui.get_quality_index().clamp(0, 7) as usize];
     c.player = ui.get_player().to_string();
     c.window_effect = EFFECTS[ui.get_effect_index().clamp(0, 2) as usize].into();
@@ -197,9 +225,29 @@ fn load(ui: &AppWindow, state: &Arc<State>, page: i32, query: Option<String>) {
     ui.set_status("".into());
     ui.set_videos(ModelRc::new(VecModel::<Video>::default()));
     let cfg = state.cfg();
+    let session = page == 0 && session_home(&cfg);
+    ui.set_session_home(session_home(&cfg));
+    if session && !state.fy.lock().unwrap().has_taste() {
+        // Nothing to go on yet: the topic picker takes Home's place.
+        ui.set_loading(false);
+        ui.set_show_welcome(true);
+        return;
+    }
+    ui.set_show_welcome(false);
+    let fy = session.then(|| state.fy.lock().unwrap().clone());
     let (weak, state) = (ui.as_weak(), state.clone());
     std::thread::spawn(move || {
         let result = match (page, query) {
+            (0, _) if fy.is_some() => {
+                let (items, visitor) = fy
+                    .unwrap()
+                    .build(|q| Engine::search_n(&cfg, q, 20), cfg.feed_size as usize);
+                let items = Engine::filter(&cfg, items);
+                let mut f = state.fy.lock().unwrap();
+                f.visitor = visitor;
+                f.served(items.iter().map(|v| v.id.clone()).collect());
+                Ok(items)
+            }
             (2, Some(q)) if !q.trim().is_empty() => Engine::search(&cfg, &q),
             (2, _) => Ok(vec![]),
             _ if cfg.account == Account::SignedOut => Err(
@@ -225,8 +273,12 @@ fn load(ui: &AppWindow, state: &Arc<State>, page: i32, query: Option<String>) {
                     }
                     if items.is_empty() && page != 2 {
                         ui.set_status(
-                            "YouTube returned an empty feed. Watch a few videos and refresh."
-                                .into(),
+                            if session {
+                                "Nothing to suggest yet. Watch a video, search, or pick some topics."
+                            } else {
+                                "YouTube returned an empty feed. Watch a few videos and refresh."
+                            }
+                            .into(),
                         );
                     }
                     *state.items.lock().unwrap() = items;
@@ -240,14 +292,17 @@ fn load(ui: &AppWindow, state: &Arc<State>, page: i32, query: Option<String>) {
 fn main() -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
     let (tx_placeholder, _) = mpsc::channel();
+    let cfg = Config::load();
     let state = Arc::new(State {
-        cfg: Mutex::new(Config::load()),
+        fy: Mutex::new(ForYou::load(cfg.foryou_remember)),
+        cfg: Mutex::new(cfg),
         items: Mutex::new(vec![]),
         generation: AtomicU64::new(0),
         thumbs: Mutex::new(tx_placeholder),
     });
     *state.thumbs.lock().unwrap() = spawn_thumbnail_workers(ui.as_weak(), state.clone());
     push_config(&ui, &state.cfg());
+    sync_foryou(&ui, &state.fy.lock().unwrap());
 
     let query = Rc::new(std::cell::RefCell::new(String::new()));
 
@@ -265,6 +320,8 @@ fn main() -> Result<(), slint::PlatformError> {
         let (weak, state, query) = (ui.as_weak(), state.clone(), query.clone());
         move |q| {
             *query.borrow_mut() = q.to_string();
+            state.fy.lock().unwrap().searched(&q);
+            sync_foryou(&weak.unwrap(), &state.fy.lock().unwrap());
             load(&weak.unwrap(), &state, 2, Some(q.to_string()));
         }
     });
@@ -283,8 +340,22 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             let cfg = state.cfg();
             match Engine::play(&cfg, &item) {
-                Ok(()) => {
-                    std::thread::spawn(move || Engine::mark_watched(&cfg, &item.id));
+                Ok(playback) => {
+                    let (cfg2, id) = (cfg.clone(), item.id.clone());
+                    std::thread::spawn(move || Engine::mark_watched(&cfg2, &id));
+                    // When the player closes, learn from how much was watched,
+                    // and refresh Home if that's where the viewer is.
+                    let (weak, state) = (weak.clone(), state.clone());
+                    std::thread::spawn(move || {
+                        let watched = playback.wait();
+                        state.fy.lock().unwrap().watched(&item, watched);
+                        let _ = weak.upgrade_in_event_loop(move |ui| {
+                            sync_foryou(&ui, &state.fy.lock().unwrap());
+                            if ui.get_page() == 0 && session_home(&state.cfg()) {
+                                load(&ui, &state, 0, None);
+                            }
+                        });
+                    });
                 }
                 Err(e) => weak.unwrap().set_status(e.into()),
             }
@@ -296,10 +367,14 @@ fn main() -> Result<(), slint::PlatformError> {
             let ui = weak.unwrap();
             let mut cfg = state.cfg.lock().unwrap();
             let before = cfg.window_effect.clone();
+            let remember = cfg.foryou_remember;
             pull_config(&ui, &mut cfg);
             cfg.save();
             if before != cfg.window_effect {
                 apply_window_effect(&ui, &cfg);
+            }
+            if remember != cfg.foryou_remember {
+                state.fy.lock().unwrap().set_remember(cfg.foryou_remember);
             }
         }
     });
@@ -335,6 +410,82 @@ fn main() -> Result<(), slint::PlatformError> {
         move || {
             let _ = std::fs::remove_file(Config::cookie_file());
             set(Account::SignedOut)
+        }
+    });
+
+    // ── Session "For you" feed ────────────────────────────────────────────
+    ui.on_toggle_topic({
+        let weak = ui.as_weak();
+        move |i| {
+            let model = weak.unwrap().get_topics();
+            if let Some(mut t) = model.row_data(i as usize) {
+                t.picked = !t.picked;
+                model.set_row_data(i as usize, t);
+            }
+        }
+    });
+    ui.on_save_topics({
+        let (weak, state) = (ui.as_weak(), state.clone());
+        move || {
+            let ui = weak.unwrap();
+            let picked: Vec<String> = ui
+                .get_topics()
+                .iter()
+                .filter(|t| t.picked)
+                .map(|t| t.name.to_string())
+                .collect();
+            state.fy.lock().unwrap().set_interests(&picked);
+            ui.set_tune_open(false);
+            sync_foryou(&ui, &state.fy.lock().unwrap());
+            load(&ui, &state, 0, None);
+        }
+    });
+    ui.on_open_tune({
+        let (weak, state) = (ui.as_weak(), state.clone());
+        move || {
+            let ui = weak.unwrap();
+            sync_foryou(&ui, &state.fy.lock().unwrap());
+            ui.set_tune_open(true);
+        }
+    });
+    ui.on_cancel_tune({
+        let weak = ui.as_weak();
+        move || weak.unwrap().set_tune_open(false)
+    });
+    ui.on_start_fresh({
+        let (weak, state) = (ui.as_weak(), state.clone());
+        move || {
+            let ui = weak.unwrap();
+            state.fy.lock().unwrap().reset();
+            ui.set_tune_open(false);
+            sync_foryou(&ui, &state.fy.lock().unwrap());
+            if ui.get_page() == 0 {
+                load(&ui, &state, 0, None);
+            }
+        }
+    });
+    ui.on_not_interested({
+        let (weak, state) = (ui.as_weak(), state.clone());
+        move |i| {
+            let Some(item) = state.items.lock().unwrap().get(i as usize).cloned() else {
+                return;
+            };
+            state.fy.lock().unwrap().not_interested(&item);
+            let ui = weak.unwrap();
+            sync_foryou(&ui, &state.fy.lock().unwrap());
+            load(&ui, &state, 0, None);
+        }
+    });
+    ui.on_set_home_session({
+        let (weak, state) = (ui.as_weak(), state.clone());
+        move |on| {
+            let ui = weak.unwrap();
+            {
+                let mut cfg = state.cfg.lock().unwrap();
+                cfg.home_source = if on { "session" } else { "youtube" }.into();
+                cfg.save();
+            }
+            load(&ui, &state, 0, None);
         }
     });
 
