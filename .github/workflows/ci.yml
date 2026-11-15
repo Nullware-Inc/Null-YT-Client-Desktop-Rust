@@ -2,5 +2,10 @@ name: CI
 on:
   push: { branches: [main], tags: ["v*"] }
   pull_request:
+
+permissions:
+  contents: write
+
 jobs:
-  build: { uses: Nullware-Inc/.github/.github/workflows/rust-app.yml@main }
+  build:
+    uses: Nullware-Inc/.github/.github/workflows/rust-app.yml@main
