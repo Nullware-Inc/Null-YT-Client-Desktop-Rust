@@ -1,0 +1,356 @@
+import { LineEdit, Switch, Slider, ComboBox, Button, ScrollView } from "std-widgets.slint";
+
+export struct Video {
+    id: string,
+    title: string,
+    channel: string,
+    meta: string,
+    duration: string,
+    live: bool,
+    thumb: image,
+}
+
+export global Theme {
+    in-out property <bool> glass: true;
+    in-out property <bool> dark: true;
+    in-out property <bool> aurora: true;
+    in-out property <bool> translucent: false;
+    in-out property <color> accent: #ff3d5a;
+    in-out property <length> radius: 18px;
+    in-out property <float> tint: 0.10;
+    in-out property <float> rim: 0.28;
+    out property <color> fg: dark ? #f2f2f7 : #15151b;
+    out property <color> muted: dark ? #f2f2f7a0 : #15151ba0;
+    out property <color> base: dark ? #0b0b10 : #f3f3f8;
+    out property <color> panel: dark ? #191920 : #ffffff;
+    out property <color> line: dark ? #ffffff18 : #0000001a;
+}
+
+// The surface everything is built from: translucent "liquid glass" with a
+// lit rim, or an opaque solid panel.
+component Surface inherits Rectangle {
+    in property <length> r: Theme.radius;
+    in property <float> strength: 1.0;
+    border-radius: r;
+    background: Theme.glass
+        ? @linear-gradient(135deg,
+            Theme.dark ? rgba(255, 255, 255, Theme.tint * 1.6 * strength) : rgba(255, 255, 255, 0.55 * strength) 0%,
+            Theme.dark ? rgba(255, 255, 255, Theme.tint * 0.4 * strength) : rgba(255, 255, 255, 0.30 * strength) 100%)
+        : Theme.panel;
+    border-width: 1px;
+    border-color: Theme.glass ? rgba(255, 255, 255, Theme.rim) : Theme.line;
+    drop-shadow-blur: Theme.glass ? 30px : 12px;
+    drop-shadow-offset-y: 6px;
+    drop-shadow-color: Theme.dark ? #0000005a : #00000020;
+    // top specular sheen
+    if Theme.glass: Rectangle {
+        y: 1px;
+        height: parent.height * 0.45;
+        border-radius: root.r;
+        background: @linear-gradient(180deg, rgba(255, 255, 255, Theme.rim * 0.35) 0%, rgba(255, 255, 255, 0) 100%);
+    }
+}
+
+component Aurora inherits Rectangle {
+    property <float> t: Theme.aurora ? animation-tick() / 40s : 0;
+    background: Theme.translucent ? Theme.base.with-alpha(0.5) : Theme.base;
+    clip: true;
+    Rectangle {
+        x: parent.width * (0.05 + 0.08 * Math.sin(t * 360deg)) - self.width / 2 + parent.width * 0.1;
+        y: parent.height * (0.10 + 0.08 * Math.cos(t * 288deg)) - self.height / 2 + parent.height * 0.1;
+        width: max(parent.width, parent.height) * 1.1;
+        height: self.width;
+        background: @radial-gradient(circle, Theme.accent.with-alpha(Theme.dark ? 0.45 : 0.30) 0%, Theme.accent.with-alpha(0) 60%);
+    }
+    Rectangle {
+        x: parent.width * (0.85 + 0.08 * Math.cos(t * 360deg + 120deg)) - self.width / 2;
+        y: parent.height * (0.30 + 0.08 * Math.sin(t * 288deg + 120deg)) - self.height / 2;
+        width: max(parent.width, parent.height) * 0.9;
+        height: self.width;
+        background: @radial-gradient(circle, #6c5cff.with-alpha(Theme.dark ? 0.35 : 0.22) 0%, #6c5cff00 60%);
+    }
+    Rectangle {
+        x: parent.width * (0.55 + 0.08 * Math.sin(t * 360deg + 240deg)) - self.width / 2;
+        y: parent.height * (0.95 + 0.06 * Math.cos(t * 288deg + 240deg)) - self.height / 2;
+        width: max(parent.width, parent.height) * 1.0;
+        height: self.width;
+        background: @radial-gradient(circle, #1ed6c3.with-alpha(Theme.dark ? 0.28 : 0.18) 0%, #1ed6c300 60%);
+    }
+}
+
+component NavItem inherits Rectangle {
+    in property <string> label;
+    in property <string> glyph;
+    in property <bool> selected;
+    callback clicked();
+    height: 44px;
+    border-radius: Theme.radius * 0.7;
+    background: selected ? Theme.accent.with-alpha(0.18) : (ta.has-hover ? Theme.fg.with-alpha(0.06) : transparent);
+    animate background { duration: 150ms; }
+    ta := TouchArea { clicked => { root.clicked(); } mouse-cursor: pointer; }
+    HorizontalLayout {
+        padding-left: 14px;
+        spacing: 14px;
+        Text { text: glyph; font-size: 18px; color: selected ? Theme.accent : Theme.fg; vertical-alignment: center; width: 20px; }
+        Text { text: label; font-size: 14px; font-weight: selected ? 700 : 500; color: Theme.fg; vertical-alignment: center; }
+    }
+}
+
+component Card inherits Rectangle {
+    in property <Video> video;
+    callback clicked();
+    ta := TouchArea { clicked => { root.clicked(); } mouse-cursor: pointer; }
+    VerticalLayout {
+        spacing: 10px;
+        thumb := Rectangle {
+            height: self.width * 9 / 16;
+            border-radius: Theme.radius * 0.8;
+            clip: true;
+            background: Theme.fg.with-alpha(0.06);
+            Image { source: video.thumb; image-fit: cover; width: 100%; height: 100%; }
+            Rectangle {
+                background: ta.has-hover ? #00000030 : #00000000;
+                animate background { duration: 150ms; }
+            }
+            if video.duration != "" || video.live: Rectangle {
+                x: parent.width - self.width - 8px;
+                y: parent.height - self.height - 8px;
+                width: badge.preferred-width + 12px;
+                height: 20px;
+                border-radius: 6px;
+                background: video.live ? #e3002b : #000000b8;
+                badge := Text { text: video.live ? "LIVE" : video.duration; color: white; font-size: 12px; font-weight: 600; }
+            }
+        }
+        Text {
+            text: video.title;
+            color: Theme.fg;
+            font-size: 14px;
+            font-weight: 600;
+            wrap: word-wrap;
+            overflow: elide;
+            height: 38px;
+        }
+        Text { text: video.channel + (video.meta != "" ? "  ·  " + video.meta : ""); color: Theme.muted; font-size: 12px; overflow: elide; }
+    }
+}
+
+component Swatch inherits Rectangle {
+    in property <color> c;
+    callback picked(color);
+    width: 30px;
+    height: 30px;
+    border-radius: 15px;
+    background: c;
+    border-width: Theme.accent == c ? 3px : 0px;
+    border-color: Theme.fg;
+    TouchArea { clicked => { root.picked(root.c); } mouse-cursor: pointer; }
+}
+
+component Row inherits HorizontalLayout {
+    in property <string> label;
+    spacing: 16px;
+    Text { text: label; color: Theme.fg; font-size: 14px; vertical-alignment: center; width: 200px; }
+    @children
+}
+
+export component AppWindow inherits Window {
+    title: "Null YT";
+    preferred-width: 1440px;
+    preferred-height: 900px;
+    min-width: 480px;
+    min-height: 560px;
+    background: Theme.translucent ? transparent : Theme.base;
+    default-font-family: "Inter";
+
+    in-out property <int> page: 0;
+    in-out property <[Video]> videos;
+    in-out property <string> status;
+    in-out property <bool> loading;
+    in-out property <string> account-label: "Not signed in";
+    in-out property <bool> signed-in;
+    in-out property <int> columns: 0;
+    in-out property <bool> hide-shorts;
+    in-out property <bool> hide-live;
+    in-out property <bool> send-history: true;
+    in-out property <int> quality-index: 5;
+    in-out property <string> player: "mpv";
+    in-out property <int> effect-index: 0;
+    in-out property <string> blocked: "";
+
+    callback open-page(int);
+    callback search(string);
+    callback play(int);
+    callback refresh();
+    callback settings-changed();
+    callback use-browser(string);
+    callback import-cookies();
+    callback sign-out();
+
+    property <length> gap: 20px;
+    property <int> auto-cols: max(1, ceil(content.width / 360px));
+    property <int> cols: columns > 0 ? columns : auto-cols;
+    property <length> card-w: (content.width - gap * (cols + 1)) / cols;
+    property <length> card-h: card-w * 9 / 16 + 90px;
+    property <[string]> titles: ["For you", "Subscriptions", "Search", "History", "Settings"];
+
+    Aurora { }
+
+    HorizontalLayout {
+        padding: 12px;
+        spacing: 12px;
+
+        Surface {
+            width: 220px;
+            strength: 1.2;
+            VerticalLayout {
+                padding: 12px;
+                spacing: 4px;
+                Text { text: "Null YT"; font-size: 22px; font-weight: 900; color: Theme.fg; height: 56px; vertical-alignment: center; x: 14px; }
+                NavItem { label: "Home"; glyph: "⌂"; selected: page == 0; clicked => { open-page(0); } }
+                NavItem { label: "Subscriptions"; glyph: "▤"; selected: page == 1; clicked => { open-page(1); } }
+                NavItem { label: "Search"; glyph: "⌕"; selected: page == 2; clicked => { open-page(2); } }
+                NavItem { label: "History"; glyph: "↺"; selected: page == 3; clicked => { open-page(3); } }
+                Rectangle { }
+                NavItem { label: "Settings"; glyph: "⚙"; selected: page == 4; clicked => { open-page(4); } }
+            }
+        }
+
+        content := Rectangle {
+            // ── Feeds ──────────────────────────────────────────────────
+            if page != 4: VerticalLayout {
+                padding-top: 16px;
+                spacing: 12px;
+                HorizontalLayout {
+                    padding-left: gap;
+                    padding-right: gap;
+                    spacing: 12px;
+                    Text { text: titles[page]; font-size: 36px; font-weight: 800; color: Theme.fg; letter-spacing: -1px; }
+                    Rectangle { }
+                    if page == 2: Surface {
+                        width: 420px;
+                        r: 999px;
+                        height: 44px;
+                        q := LineEdit {
+                            x: 12px;
+                            width: parent.width - 24px;
+                            placeholder-text: "Search YouTube";
+                            accepted => { search(self.text); }
+                        }
+                    }
+                    Button { text: "Refresh"; clicked => { refresh(); } }
+                }
+                if status != "": Surface {
+                    height: 48px;
+                    Text { text: status; color: Theme.fg; wrap: word-wrap; x: 16px; width: parent.width - 32px; vertical-alignment: center; }
+                }
+                ScrollView {
+                    content-height: ceil(videos.length / cols) * (card-h + gap) + gap;
+                    content-width: self.visible-width;
+                    for v[i] in videos: Card {
+                        video: v;
+                        x: gap + mod(i, cols) * (card-w + gap);
+                        y: gap + floor(i / cols) * (card-h + gap);
+                        width: card-w;
+                        height: card-h;
+                        clicked => { play(i); }
+                    }
+                }
+            }
+
+            // ── Settings ───────────────────────────────────────────────
+            if page == 4: ScrollView {
+                VerticalLayout {
+                    padding: 24px;
+                    spacing: 20px;
+                    alignment: start;
+                    Text { text: "Settings"; font-size: 36px; font-weight: 800; color: Theme.fg; }
+
+                    Surface {
+                        VerticalLayout {
+                            padding: 20px;
+                            spacing: 14px;
+                            Text { text: "Look"; font-size: 20px; font-weight: 700; color: Theme.fg; }
+                            Row { label: "Liquid glass"; Switch { checked <=> Theme.glass; toggled => { settings-changed(); } } }
+                            Row { label: "Dark mode"; Switch { checked <=> Theme.dark; toggled => { settings-changed(); } } }
+                            Row { label: "Animated aurora"; Switch { checked <=> Theme.aurora; toggled => { settings-changed(); } } }
+                            Row {
+                                label: "Accent";
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: start;
+                                    for c in [#ff3d5a, #ff7a1a, #ffc23d, #3ddc84, #1ed6c3, #3d9bff, #6c5cff, #b45cff, #ff5cc8, #e8e8e8]: Swatch {
+                                        c: c;
+                                        picked(x) => { Theme.accent = x; settings-changed(); }
+                                    }
+                                }
+                            }
+                            Row { label: "Corner radius"; Slider { minimum: 0; maximum: 36; value: Theme.radius / 1px; changed(v) => { Theme.radius = v * 1px; settings-changed(); } } }
+                            Row { label: "Glass tint"; Slider { minimum: 0; maximum: 0.5; value: Theme.tint; changed(v) => { Theme.tint = v; settings-changed(); } } }
+                            Row { label: "Rim light"; Slider { minimum: 0; maximum: 1; value: Theme.rim; changed(v) => { Theme.rim = v; settings-changed(); } } }
+                            Row { label: "Grid columns (0 = auto)"; Slider { minimum: 0; maximum: 8; step: 1; value: columns; changed(v) => { columns = round(v); settings-changed(); } } }
+                            Row {
+                                label: "Window material";
+                                ComboBox {
+                                    model: ["None", "Mica", "Acrylic"];
+                                    current-index <=> effect-index;
+                                    selected => { settings-changed(); }
+                                }
+                            }
+                        }
+                    }
+
+                    Surface {
+                        VerticalLayout {
+                            padding: 20px;
+                            spacing: 14px;
+                            Text { text: "Feed & player"; font-size: 20px; font-weight: 700; color: Theme.fg; }
+                            Row { label: "Hide Shorts"; Switch { checked <=> hide-shorts; toggled => { settings-changed(); } } }
+                            Row { label: "Hide live streams"; Switch { checked <=> hide-live; toggled => { settings-changed(); } } }
+                            Row { label: "Blocked keywords"; LineEdit { text <=> blocked; placeholder-text: "comma, separated"; edited => { settings-changed(); } } }
+                            Row {
+                                label: "Preferred quality";
+                                ComboBox {
+                                    model: ["144p", "240p", "360p", "480p", "720p", "1080p", "1440p", "2160p"];
+                                    current-index <=> quality-index;
+                                    selected => { settings-changed(); }
+                                }
+                            }
+                            Row { label: "Player command"; LineEdit { text <=> player; edited => { settings-changed(); } } }
+                        }
+                    }
+
+                    Surface {
+                        VerticalLayout {
+                            padding: 20px;
+                            spacing: 14px;
+                            Text { text: "Account & YouTube sync"; font-size: 20px; font-weight: 700; color: Theme.fg; }
+                            Text { text: account-label; color: signed-in ? Theme.accent : Theme.muted; font-size: 14px; }
+                            Text {
+                                text: "Your YouTube session is borrowed from a browser you're already signed in to (or a cookies.txt). No API keys, no Google Cloud.";
+                                color: Theme.muted; wrap: word-wrap; font-size: 12px;
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                Button { text: "Use Firefox"; clicked => { use-browser("firefox"); } }
+                                Button { text: "Use Chrome"; clicked => { use-browser("chrome"); } }
+                                Button { text: "Use Edge"; clicked => { use-browser("edge"); } }
+                                Button { text: "Use Brave"; clicked => { use-browser("brave"); } }
+                                Button { text: "Import cookies.txt"; clicked => { import-cookies(); } }
+                                if signed-in: Button { text: "Sign out"; clicked => { sign-out(); } }
+                            }
+                            Row { label: "Send watch history"; Switch { checked <=> send-history; toggled => { settings-changed(); } } }
+                        }
+                    }
+                }
+            }
+
+            if loading: Rectangle {
+                y: 0;
+                height: 3px;
+                background: @linear-gradient(90deg, Theme.accent.with-alpha(0) 0%, Theme.accent 50%, Theme.accent.with-alpha(0) 100%);
+            }
+        }
+    }
+}
